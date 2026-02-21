@@ -167,7 +167,9 @@ make setup                           # download 36GiB historical dataset
 
 | # | Mistake | Correct Approach |
 |---|---------|-----------------|
-| 1 | _(none yet — first session; populate as work proceeds)_ | — |
+| 1 | `categories.py` `get_group()` uses substring matching (`pattern in string`), so "EC" matches inside "FEDDECISION" → classified as Electoral College instead of Finance/Fed | Built `_get_group_prefix()` in `classifier.py` that extracts the alphabetic prefix and does longest-prefix-first matching. Never use `get_group()` directly for the RV system. |
+| 2 | Polymarket classifier: "win" keyword in Sports regex triggered on political/entertainment questions ("win the Senate", "win the Oscar") | Reordered `_POLYMARKET_PATTERNS` so Politics and Entertainment are checked before Sports. Removed generic "win the" from Sports pattern; kept only specific sports terms. |
+| 3 | Float comparison `assert q.spread == 0.02` fails due to floating point precision (0.57 - 0.55 = 0.01999...9907) | Always use `abs(a - b) < 1e-10` or `pytest.approx()` for float comparisons. Never `==` on floats. |
 
 ---
 
@@ -209,4 +211,4 @@ make setup                           # download 36GiB historical dataset
 
 ---
 
-*Last updated: 2026-02-21 — Full prior chat context integrated.*
+*Last updated: 2026-02-21 — Phase 1 complete: src/rv/ modules + 80 tests all passing.*
