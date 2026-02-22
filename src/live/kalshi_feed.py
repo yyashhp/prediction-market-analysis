@@ -28,11 +28,14 @@ class KalshiFeed:
     def close(self) -> None:
         self.client.close()
 
-    def fetch_active_markets(self, status: str = "open") -> list[NormalizedQuote]:
-        """Fetch all active markets and return normalized quotes.
+    def fetch_active_markets(self, status: str = "open", max_pages: int = 5) -> list[NormalizedQuote]:
+        """Fetch active markets and return normalized quotes.
 
         Args:
             status: Market status filter (default: "open" for active markets)
+            max_pages: Maximum number of pages to fetch (200 markets each).
+                Caps at 1000 markets by default — sufficient for finding edges
+                without paginating through thousands of illiquid tail markets.
 
         Returns:
             List of NormalizedQuote objects with topic classification applied.
@@ -41,7 +44,7 @@ class KalshiFeed:
 
         try:
             cursor = None
-            while True:
+            for _ in range(max_pages):
                 params: dict = {"limit": 200, "status": status}
                 if cursor:
                     params["cursor"] = cursor

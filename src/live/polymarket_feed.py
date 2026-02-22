@@ -7,6 +7,7 @@ and normalize them into NormalizedQuote objects.
 from __future__ import annotations
 
 import logging
+import time
 
 from src.indexers.polymarket.client import PolymarketClient
 from src.rv.classifier import classify_polymarket
@@ -27,8 +28,13 @@ class PolymarketFeed:
     def close(self) -> None:
         self.client.close()
 
-    def fetch_active_markets(self) -> list[NormalizedQuote]:
-        """Fetch all active (non-closed) markets and return normalized quotes.
+    def fetch_active_markets(self, max_pages: int = 5) -> list[NormalizedQuote]:
+        """Fetch active (non-closed) markets and return normalized quotes.
+
+        Args:
+            max_pages: Maximum pages to fetch (500 markets each).
+                Caps at 2500 markets by default — sufficient for finding edges
+                without iterating through tens of thousands of tail markets.
 
         Returns:
             List of NormalizedQuote objects with topic classification applied.
@@ -39,7 +45,7 @@ class PolymarketFeed:
             offset = 0
             limit = 500
 
-            while True:
+            for page in range(max_pages):
                 try:
                     markets = self.client.get_markets(limit=limit, offset=offset, active=True, closed=False)
                 except Exception as e:
@@ -79,6 +85,8 @@ class PolymarketFeed:
                     break
 
                 offset += len(markets)
+                if page < max_pages - 1:
+                    time.sleep(0.2)  # avoid Polymarket rate limits between pages
 
         except Exception as e:
             logger.error("Failed to fetch Polymarket markets: %s", e)

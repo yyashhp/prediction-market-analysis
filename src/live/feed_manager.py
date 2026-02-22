@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime
 
@@ -90,24 +91,29 @@ class FeedManager:
     def snapshot(self) -> MarketSnapshot:
         """Fetch all sources and return a unified snapshot.
 
-        Fetches from both venues (gracefully degrades if one is down),
+        Fetches from both venues in parallel (gracefully degrades if one is down),
         applies topic classification (already done in feeds).
         """
         start = time.monotonic()
         kalshi_quotes: list[NormalizedQuote] = []
         poly_quotes: list[NormalizedQuote] = []
 
-        if self.kalshi_feed:
-            try:
-                kalshi_quotes = self.kalshi_feed.fetch_active_markets()
-            except Exception as e:
-                logger.error("Kalshi feed failed: %s", e)
+        futures: dict = {}
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            if self.kalshi_feed:
+                futures["kalshi"] = pool.submit(self.kalshi_feed.fetch_active_markets)
+            if self.polymarket_feed:
+                futures["poly"] = pool.submit(self.polymarket_feed.fetch_active_markets)
 
-        if self.polymarket_feed:
-            try:
-                poly_quotes = self.polymarket_feed.fetch_active_markets()
-            except Exception as e:
-                logger.error("Polymarket feed failed: %s", e)
+            for key, fut in futures.items():
+                try:
+                    result = fut.result()
+                    if key == "kalshi":
+                        kalshi_quotes = result
+                    else:
+                        poly_quotes = result
+                except Exception as e:
+                    logger.error("%s feed failed: %s", key, e)
 
         duration = time.monotonic() - start
 
