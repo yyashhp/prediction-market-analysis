@@ -7,6 +7,7 @@ and normalize them into NormalizedQuote objects.
 from __future__ import annotations
 
 import logging
+import time
 
 from src.indexers.kalshi.client import KalshiClient
 from src.rv.classifier import classify_kalshi
@@ -66,6 +67,7 @@ class KalshiFeed:
                 cursor = data.get("cursor")
                 if not cursor or not markets:
                     break
+                time.sleep(0.35)  # stay well under Kalshi's rate limit between pages
 
         except Exception as e:
             logger.error("Failed to fetch Kalshi markets: %s", e)
