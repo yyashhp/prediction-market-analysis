@@ -1,0 +1,528 @@
+"""Streamlit prediction market RV research dashboard.
+
+Organizes all fetched contracts by topic and event group, rendering
+term structure curves and threshold CDF plots for each detected series.
+This is a research surface — not an alert system. Show the structure,
+let the analyst spot the patterns.
+
+Run:
+    uv run streamlit run src/dashboard/streamlit_app.py
+    make dashboard
+"""
+
+from __future__ import annotations
+
+import matplotlib
+
+matplotlib.use("Agg")  # must be before pyplot import
+
+from datetime import datetime  # noqa: E402
+
+import matplotlib.dates as mdates  # noqa: E402
+import matplotlib.pyplot as plt  # noqa: E402
+import numpy as np  # noqa: E402
+import pandas as pd  # noqa: E402
+import streamlit as st  # noqa: E402
+
+from src.dashboard.app import create_feed_manager  # noqa: E402
+from src.dashboard.config import DashboardConfig  # noqa: E402
+from src.live.feed_manager import MarketSnapshot  # noqa: E402
+from src.rv.classifier import Topic  # noqa: E402
+from src.rv.matcher import ContractSeries, _extract_threshold, detect_series  # noqa: E402
+from src.rv.normalizer import NormalizedQuote  # noqa: E402
+
+# ─── Page config ──────────────────────────────────────────────────────────────
+
+st.set_page_config(
+    page_title="PM RV Dashboard",
+    page_icon="📊",
+    layout="wide",
+    initial_sidebar_state="expanded",
+    menu_items={"About": "Prediction Market Relative Value Research Dashboard"},
+)
+
+# ─── Data layer ───────────────────────────────────────────────────────────────
+
+
+@st.cache_resource(show_spinner=False)
+def _get_feed_manager():
+    """Singleton FeedManager — HTTP clients created once for the app lifetime."""
+    return create_feed_manager(DashboardConfig.from_env())
+
+
+def _do_fetch() -> MarketSnapshot:
+    with st.spinner("Fetching markets from Kalshi and Polymarket…"):
+        return _get_feed_manager().snapshot()
+
+
+# Initialise session state on first load
+if "snapshot" not in st.session_state:
+    st.session_state["snapshot"] = _do_fetch()
+    st.session_state["fetched_at"] = datetime.now()
+
+
+# ─── Helpers ──────────────────────────────────────────────────────────────────
+
+
+def _quotes_to_df(quotes: list[NormalizedQuote]) -> pd.DataFrame:
+    rows = []
+    for q in quotes:
+        rows.append(
+            {
+                "ID": q.market_id,
+                "Title": q.title,
+                "Venue": q.venue.capitalize(),
+                "Topic": q.topic.capitalize() if q.topic else "—",
+                "Event Group": q.event_group or "—",
+                "Mid": round(q.prob_mid_or_last, 4),
+                "Bid": round(q.prob_bid, 4) if q.prob_bid is not None else None,
+                "Ask": round(q.prob_ask, 4) if q.prob_ask is not None else None,
+                "Spread pp": round(q.spread * 100, 2) if q.spread is not None else None,
+                "Vol 24h": round(q.volume_24h or 0),
+                "OI": q.open_interest or 0,
+                "Total Vol": round(q.total_volume or 0),
+                "Closes": q.close_time.date() if q.close_time else None,
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def _term_structure_chart(
+    series_by_venue: dict[str, list[NormalizedQuote]],
+    title: str,
+) -> plt.Figure:
+    """Plot probability vs resolution date, one line per venue."""
+    fig, ax = plt.subplots(figsize=(11, 4))
+    palette = {"kalshi": "#e06c75", "polymarket": "#61afef"}
+
+    for venue, quotes in series_by_venue.items():
+        quotes_dated = sorted([q for q in quotes if q.close_time], key=lambda q: q.close_time)
+        if not quotes_dated:
+            continue
+        xs = [q.close_time for q in quotes_dated]
+        ys = [q.prob_mid_or_last * 100 for q in quotes_dated]
+        color = palette.get(venue, "#abb2bf")
+        ax.plot(xs, ys, "o-", color=color, label=venue.capitalize(), lw=2, ms=7, zorder=3)
+
+        # Bid/ask shading
+        lo = [q.prob_bid * 100 if q.prob_bid is not None else q.prob_mid_or_last * 100 for q in quotes_dated]
+        hi = [q.prob_ask * 100 if q.prob_ask is not None else q.prob_mid_or_last * 100 for q in quotes_dated]
+        ax.fill_between(xs, lo, hi, color=color, alpha=0.12)
+
+        # Annotate each point
+        for x, y in zip(xs, ys):
+            ax.annotate(
+                f"{y:.1f}%",
+                (x, y),
+                textcoords="offset points",
+                xytext=(0, 10),
+                ha="center",
+                fontsize=8,
+                color=color,
+            )
+
+    ax.set_ylabel("Implied Probability (%)")
+    ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:.0f}%"))
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%b %d"))
+    fig.autofmt_xdate(rotation=30)
+    ax.grid(True, alpha=0.2, linestyle="--")
+    ax.legend(loc="upper left")
+    ax.set_title(title, fontsize=11, fontweight="bold")
+    fig.tight_layout()
+    return fig
+
+
+def _cdf_chart(
+    pts: list[tuple[NormalizedQuote, float]],
+    title: str,
+    fit_normal: bool = True,
+) -> plt.Figure:
+    """Plot P(X > threshold) vs threshold, optionally overlay fitted normal."""
+    pts = sorted(pts, key=lambda x: x[1])
+    xs = np.array([t for _, t in pts])
+    ys = np.array([q.prob_mid_or_last * 100 for q, _ in pts])
+
+    fig, ax = plt.subplots(figsize=(11, 4))
+    ax.plot(xs, ys, "o-", color="#98c379", lw=2, ms=8, label="Market mid", zorder=3)
+
+    lo = [q.prob_bid * 100 if q.prob_bid is not None else q.prob_mid_or_last * 100 for q, _ in pts]
+    hi = [q.prob_ask * 100 if q.prob_ask is not None else q.prob_mid_or_last * 100 for q, _ in pts]
+    ax.fill_between(xs, lo, hi, color="#98c379", alpha=0.15, label="Bid/Ask band")
+
+    residuals: dict[float, float] = {}
+
+    if fit_normal and len(pts) >= 3:
+        try:
+            from scipy.optimize import curve_fit
+            from scipy.stats import norm
+
+            cdf_vals = 1.0 - ys / 100.0
+            std_guess = max(float(np.std(xs)), 1e-3)
+            popt, _ = curve_fit(
+                lambda x, mu, sigma: norm.cdf(x, mu, sigma),
+                xs,
+                cdf_vals,
+                p0=[float(np.mean(xs)), std_guess],
+                maxfev=5000,
+            )
+            mu, sigma = float(popt[0]), float(popt[1])
+            if sigma > 0:
+                xr = np.linspace(xs[0] - 2 * abs(sigma), xs[-1] + 2 * abs(sigma), 300)
+                ax.plot(
+                    xr,
+                    (1 - norm.cdf(xr, mu, sigma)) * 100,
+                    "--",
+                    color="#e5c07b",
+                    lw=1.5,
+                    label=f"Fitted Normal  μ={mu:.2f}  σ={sigma:.2f}",
+                )
+                # Residuals
+                for x, y in zip(xs, ys):
+                    r = y - (1 - norm.cdf(x, mu, sigma)) * 100
+                    residuals[x] = r
+                    color = "#e06c75" if abs(r) > 2 else "#abb2bf"
+                    ax.annotate(
+                        f"{r:+.1f}pp",
+                        (x, y),
+                        textcoords="offset points",
+                        xytext=(0, 13),
+                        ha="center",
+                        fontsize=8,
+                        color=color,
+                    )
+        except Exception:
+            pass
+
+    if not residuals:
+        # No fit — just annotate mid values
+        for x, y in zip(xs, ys):
+            ax.annotate(f"{y:.1f}%", (x, y), textcoords="offset points", xytext=(0, 10), ha="center", fontsize=8)
+
+    ax.set_xlabel("Threshold")
+    ax.set_ylabel("P(X > threshold) (%)")
+    ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:.0f}%"))
+    ax.grid(True, alpha=0.2, linestyle="--")
+    ax.legend(loc="upper right")
+    ax.set_title(title, fontsize=11, fontweight="bold")
+    fig.tight_layout()
+    return fig
+
+
+# ─── Sidebar ──────────────────────────────────────────────────────────────────
+
+with st.sidebar:
+    st.markdown("## ⚙ Controls")
+
+    if st.button("↺ Refresh Data", type="primary", use_container_width=True):
+        st.session_state["snapshot"] = _do_fetch()
+        st.session_state["fetched_at"] = datetime.now()
+        st.rerun()
+
+    st.markdown("---")
+
+    selected_topics = st.multiselect(
+        "Topics",
+        options=["weather", "sports", "macro", "crypto", "politics", "entertainment", "other"],
+        default=["weather", "sports", "macro"],
+        format_func=str.capitalize,
+    )
+
+    selected_venues = st.multiselect(
+        "Venues",
+        options=["kalshi", "polymarket"],
+        default=["kalshi", "polymarket"],
+        format_func=str.capitalize,
+    )
+
+    st.markdown("---")
+    st.markdown("**Liquidity filters**")
+    min_total_vol = st.number_input("Min total volume ($)", min_value=0, value=0, step=500)
+    min_oi = st.number_input("Min open interest", min_value=0, value=0, step=50)
+    min_series_size = st.slider("Min contracts per series", min_value=2, max_value=5, value=2)
+
+    st.markdown("---")
+    st.caption("Refresh pulls fresh data from the APIs.\n\nFilters apply to all views without re-fetching.")
+
+# ─── Apply filters ────────────────────────────────────────────────────────────
+
+snapshot: MarketSnapshot = st.session_state["snapshot"]
+fetched_at: datetime = st.session_state.get("fetched_at", datetime.now())
+
+
+def _filter(quotes: list[NormalizedQuote]) -> list[NormalizedQuote]:
+    return [
+        q
+        for q in quotes
+        if q.topic in selected_topics
+        and q.venue in selected_venues
+        and (q.total_volume or 0) >= min_total_vol
+        and (q.open_interest or 0) >= min_oi
+    ]
+
+
+kalshi_shown = _filter(snapshot.kalshi_quotes)
+poly_shown = _filter(snapshot.polymarket_quotes)
+all_shown = kalshi_shown + poly_shown
+
+# Pre-detect all series (used by Term Structures + Threshold CDFs tabs)
+all_series: list[ContractSeries] = []
+for _tv in selected_topics:
+    try:
+        _topic_enum = Topic(_tv)
+    except ValueError:
+        continue
+    _tq = [q for q in all_shown if q.topic == _tv]
+    all_series.extend(detect_series(_tq, _topic_enum, min_series_size=min_series_size))
+
+term_series = [s for s in all_series if s.series_type == "term_structure"]
+cdf_series = [s for s in all_series if s.series_type == "threshold"]
+
+# ─── Page header ──────────────────────────────────────────────────────────────
+
+st.markdown("# 📊 Prediction Market RV Dashboard")
+
+c1, c2, c3, c4, c5 = st.columns(5)
+c1.metric("Kalshi", f"{len(snapshot.kalshi_quotes):,}", f"{len(kalshi_shown)} shown")
+c2.metric("Polymarket", f"{len(snapshot.polymarket_quotes):,}", f"{len(poly_shown)} shown")
+c3.metric("Term Structures", len(term_series))
+c4.metric("Threshold CDFs", len(cdf_series))
+c5.metric("As of", fetched_at.strftime("%H:%M:%S"), f"fetch {snapshot.fetch_duration_seconds:.1f}s")
+
+st.markdown("---")
+
+# ─── Tabs ─────────────────────────────────────────────────────────────────────
+
+tab_browser, tab_groups, tab_term, tab_cdf = st.tabs(
+    [
+        "📋  Market Browser",
+        "🔗  Event Groups",
+        "📈  Term Structures",
+        "📉  Threshold CDFs",
+    ]
+)
+
+# ════════════════════════════════════════════════════════════════════════════════
+# TAB 1 — Market Browser
+# Flat sortable/filterable table of every fetched contract.
+# ════════════════════════════════════════════════════════════════════════════════
+
+with tab_browser:
+    st.markdown(f"**{len(all_shown):,} contracts** · {len(kalshi_shown)} Kalshi · {len(poly_shown)} Polymarket")
+
+    if not all_shown:
+        st.info("No contracts match the current filters.")
+    else:
+        df = _quotes_to_df(all_shown)
+        st.dataframe(
+            df,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "ID": st.column_config.TextColumn("Market ID", width="medium"),
+                "Title": st.column_config.TextColumn("Title", width="large"),
+                "Mid": st.column_config.ProgressColumn(
+                    "Mid prob",
+                    help="Implied probability (0–1). Bar fill = probability.",
+                    min_value=0.0,
+                    max_value=1.0,
+                    format="%.3f",
+                ),
+                "Bid": st.column_config.NumberColumn("Bid", format="%.3f"),
+                "Ask": st.column_config.NumberColumn("Ask", format="%.3f"),
+                "Spread pp": st.column_config.NumberColumn("Spread (pp)", format="%.2f"),
+                "Vol 24h": st.column_config.NumberColumn("Vol 24h", format="$%,.0f"),
+                "OI": st.column_config.NumberColumn("OI", format="%,d"),
+                "Total Vol": st.column_config.NumberColumn("Total Vol", format="$%,.0f"),
+                "Closes": st.column_config.DateColumn("Closes"),
+            },
+        )
+
+# ════════════════════════════════════════════════════════════════════════════════
+# TAB 2 — Event Groups
+# Browse any event group with 2+ contracts. Auto-renders a term-structure chart
+# or threshold chart depending on what the group contains.
+# ════════════════════════════════════════════════════════════════════════════════
+
+with tab_groups:
+    # Build event group index
+    groups: dict[str, list[NormalizedQuote]] = {}
+    for q in all_shown:
+        if q.event_group and q.event_group != "—":
+            groups.setdefault(q.event_group, []).append(q)
+
+    multi = {k: v for k, v in groups.items() if len(v) >= 2}
+    multi_sorted = dict(sorted(multi.items(), key=lambda kv: -len(kv[1])))
+
+    if not multi_sorted:
+        st.info("No event groups with 2+ contracts found under current filters.")
+    else:
+        col_list, col_detail = st.columns([1, 3], gap="large")
+
+        with col_list:
+            group_keys = list(multi_sorted.keys())
+            sel_key = st.selectbox(
+                f"Event groups ({len(multi_sorted)})",
+                options=group_keys,
+                format_func=lambda k: f"{k}  [{len(multi_sorted[k])} contracts]",
+                help="Groups are sorted by contract count, largest first.",
+            )
+
+        if sel_key:
+            gq = multi_sorted[sel_key]
+            venues_in_group = sorted({q.venue.capitalize() for q in gq})
+            topics_in_group = sorted({q.topic.capitalize() for q in gq if q.topic})
+
+            with col_detail:
+                st.markdown(
+                    f"**{sel_key}** &nbsp;·&nbsp; "
+                    f"{len(gq)} contracts &nbsp;·&nbsp; "
+                    f"{'  /  '.join(venues_in_group)} &nbsp;·&nbsp; "
+                    f"{'  /  '.join(topics_in_group)}"
+                )
+
+            # Contracts table
+            st.dataframe(_quotes_to_df(gq), use_container_width=True, hide_index=True)
+
+            # Auto-detect and render chart
+            dated = [q for q in gq if q.close_time is not None]
+            unique_dates = {q.close_time.date() for q in dated}
+
+            thresh_pts = [(q, _extract_threshold(q.title)) for q in gq]
+            thresh_pts_clean = [(q, t) for q, t in thresh_pts if t is not None]
+
+            if len(unique_dates) >= 2:
+                # Term structure — split by venue so both lines show
+                by_venue: dict[str, list[NormalizedQuote]] = {}
+                for q in dated:
+                    by_venue.setdefault(q.venue, []).append(q)
+                fig = _term_structure_chart(by_venue, f"{sel_key} — Term Structure")
+                st.pyplot(fig)
+                plt.close(fig)
+
+            elif len(thresh_pts_clean) >= 2:
+                fig = _cdf_chart(thresh_pts_clean, f"{sel_key} — Threshold Structure")
+                st.pyplot(fig)
+                plt.close(fig)
+
+            else:
+                st.caption("No date or threshold variation detected — chart not available for this group.")
+
+            # Raw detail expander
+            with st.expander("Raw contract detail"):
+                for q in sorted(gq, key=lambda q: q.close_time or datetime.min):
+                    st.code(
+                        f"ID:     {q.market_id}\n"
+                        f"Title:  {q.title}\n"
+                        f"Venue:  {q.venue}  |  Topic: {q.topic}\n"
+                        f"Mid:    {q.prob_mid_or_last:.4f}  "
+                        f"Bid: {q.prob_bid:.4f if q.prob_bid else 'n/a'}  "
+                        f"Ask: {q.prob_ask:.4f if q.prob_ask else 'n/a'}  "
+                        f"Spread: {q.spread * 100:.2f}pp"
+                        if q.spread
+                        else "Spread: n/a",
+                        language="text",
+                    )
+
+# ════════════════════════════════════════════════════════════════════════════════
+# TAB 3 — Term Structures
+# All detected term structure series across enabled topics.
+# Select one → full-width chart with annotated probability path.
+# ════════════════════════════════════════════════════════════════════════════════
+
+with tab_term:
+    if not term_series:
+        st.info(
+            "No term structure series detected under current filters.\n\n"
+            "Try: lowering liquidity filters, expanding topics, or reducing "
+            "the min-contracts-per-series slider."
+        )
+    else:
+        col_list, col_info = st.columns([1, 3], gap="large")
+
+        with col_list:
+            ts_labels = [f"{s.event_group}  [{s.venue[:1].upper()}]  ({s.size})" for s in term_series]
+            sel_ts = st.selectbox(
+                f"Series ({len(term_series)})",
+                options=range(len(term_series)),
+                format_func=lambda i: ts_labels[i],
+            )
+
+        s = term_series[sel_ts]
+
+        with col_info:
+            dates_present = [q.close_time for q in s.contracts if q.close_time]
+            date_range = (
+                f"{min(dates_present).strftime('%b %d')} → {max(dates_present).strftime('%b %d, %Y')}"
+                if dates_present
+                else "—"
+            )
+            st.markdown(
+                f"**{s.event_group}** &nbsp;·&nbsp; "
+                f"{s.venue.capitalize()} &nbsp;·&nbsp; "
+                f"{s.topic.value.capitalize()} &nbsp;·&nbsp; "
+                f"{s.size} contracts &nbsp;·&nbsp; {date_range}"
+            )
+
+        # Chart
+        by_venue_ts: dict[str, list[NormalizedQuote]] = {}
+        for q in s.contracts:
+            by_venue_ts.setdefault(q.venue, []).append(q)
+        fig = _term_structure_chart(by_venue_ts, f"{s.event_group} — Term Structure")
+        st.pyplot(fig)
+        plt.close(fig)
+
+        # Contracts table
+        st.dataframe(_quotes_to_df(s.contracts), use_container_width=True, hide_index=True)
+
+# ════════════════════════════════════════════════════════════════════════════════
+# TAB 4 — Threshold CDFs
+# All detected threshold series. Shows P(X > threshold) vs threshold —
+# the market's implied survivor function — with fitted normal overlay
+# and residual annotations (red if deviation > 2pp from fit).
+# ════════════════════════════════════════════════════════════════════════════════
+
+with tab_cdf:
+    if not cdf_series:
+        st.info(
+            "No threshold CDF series detected under current filters.\n\n"
+            "These require 3+ contracts in the same event group with parseable "
+            "numeric thresholds in their titles (e.g. 'CPI above 3.0%', "
+            "'Temperature above 80°F')."
+        )
+    else:
+        col_list, col_info = st.columns([1, 3], gap="large")
+
+        with col_list:
+            cdf_labels = [f"{s.event_group}  [{s.venue[:1].upper()}]  ({s.size})" for s in cdf_series]
+            sel_cdf = st.selectbox(
+                f"Series ({len(cdf_series)})",
+                options=range(len(cdf_series)),
+                format_func=lambda i: cdf_labels[i],
+            )
+
+        s = cdf_series[sel_cdf]
+
+        with col_info:
+            st.markdown(
+                f"**{s.event_group}** &nbsp;·&nbsp; "
+                f"{s.venue.capitalize()} &nbsp;·&nbsp; "
+                f"{s.topic.value.capitalize()} &nbsp;·&nbsp; "
+                f"{s.size} contracts"
+            )
+            st.caption("Chart shows P(X > threshold). Red residual annotations = deviation > 2pp from fitted normal.")
+
+        pts = [(q, _extract_threshold(q.title)) for q in s.contracts]
+        pts_clean: list[tuple[NormalizedQuote, float]] = [(q, t) for q, t in pts if t is not None]
+
+        if len(pts_clean) >= 2:
+            fig = _cdf_chart(pts_clean, f"{s.event_group} — Implied Survivor Function", fit_normal=True)
+            st.pyplot(fig)
+            plt.close(fig)
+        else:
+            st.warning("Couldn't extract thresholds from contract titles — chart unavailable.")
+
+        # Contracts table with threshold column injected
+        df_cdf = _quotes_to_df(s.contracts)
+        threshold_map = {q.market_id: t for q, t in pts_clean}
+        df_cdf.insert(5, "Threshold", df_cdf["ID"].map(threshold_map))
+        st.dataframe(df_cdf, use_container_width=True, hide_index=True)

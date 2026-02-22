@@ -76,8 +76,9 @@ related contracts constrain each other?* Three structural analogs replace the vo
 ## 3. Existing Codebase Architecture
 
 ### Entry Point
-- `main.py` — CLI: `analyze`, `index`, `package`
+- `main.py` — CLI: `analyze`, `index`, `package`, `dashboard` (terminal once-off)
 - `make analyze` → interactive menu; `uv run main.py analyze <name>` → specific analysis
+- **`make dashboard`** → launches the Streamlit research dashboard at `localhost:8501`
 
 ### Source Tree (Pre-Existing)
 ```
@@ -98,12 +99,16 @@ src/
     util/            # package_data, string utils
 ```
 
-### New Modules (Being Built — See DESIGN.md)
+### New Modules (Complete)
 ```
 src/
   rv/                # Relative value core: normalizer, matcher, edge calc, Kelly
-  live/              # Live API polling layer
-  dashboard/         # Live dashboard UI
+  live/              # Live API polling layer (KalshiFeed, PolymarketFeed, FeedManager)
+  dashboard/
+    streamlit_app.py # PRIMARY UI — Streamlit research dashboard (make dashboard)
+    app.py           # FeedManager wiring + terminal once-off runner
+    renderer.py      # Terminal text renderer (secondary, for CLI --once)
+    config.py        # DashboardConfig (env-based)
 ```
 
 ### Data Layout (Historical Parquet — For Backtesting/Reference)
@@ -125,6 +130,7 @@ final `outcome_prices` ≈ 0.99/0.01 → winner. Block → timestamp join for ti
 ### Dependencies Already Available
 **Live access:** `kalshi-python`, `polymarket-py`, `httpx`, `web3`, `tenacity`
 **Analysis:** `duckdb`, `pandas`, `matplotlib`, `scipy`, `tqdm`, `brokenaxes`, `squarify`
+**Dashboard:** `streamlit>=1.35`
 **Dev:** `pytest`, `ruff` (line-length=120, py39, isort, pyflakes, bugbear)
 **Infra:** `pyarrow`, `python-dotenv`, `cryptography`, `imageio`
 
@@ -148,6 +154,7 @@ final `outcome_prices` ≈ 0.99/0.01 → winner. Block → timestamp join for ti
 ### Running Things
 ```bash
 uv sync                              # install deps
+make dashboard                       # launch Streamlit dashboard → localhost:8501
 make analyze                         # interactive analysis menu
 uv run main.py analyze <name>        # run specific batch analysis
 make index                           # interactive indexer menu
@@ -177,29 +184,33 @@ make setup                           # download 36GiB historical dataset
 
 1. **No market making** — adverse selection + no rebates + queue disadvantage kills small-bankroll maker strategies
 2. **Selective taker only** — enter when model disagrees with market by more than the bid-ask spread
-3. **Cross-venue arb is highest capital efficiency** — simultaneous Kalshi + Polymarket on same event
-4. **Weather is the most tractable alpha source** — retail participants not using ECMWF/GFS ensemble forecasts; physical variable is directly measurable
-5. **Sports: use Vegas/FanDuel as the reference model** — deep, liquid, and accurate
-6. **Macro/Fed: use CME FedWatch** — gives exact implied probabilities from Fed funds futures; fit Markov path model for conditional probabilities
-7. **Skip Crypto** — too many sophisticated participants
-8. **Avoid Politics** — high adverse selection, insider risk, not systematic
-9. **Liquidity filters are mandatory** — without them the dashboard is noise
-10. **Kelly sizing with hard caps** — size = f(edge, spread, bankroll); hard cap per contract/topic/venue
-11. **Dashboard is the product** — live, not batch; per-topic panels; auto-refreshing
-12. **Contracts must share terms within series** — compare "Fed rate decision" across months (same terms, different expiry), never apples-to-oranges
-13. **Don't mess with weirdly-termed contracts** — stick to standardized series even if oddball contracts have edge (execution risk too high)
+3. **Cross-venue arb is NOT the primary focus** — it is one lens among many; the dashboard is a research surface first
+4. **Dashboard goal = show market structure, not alert on trades** — show term structure curves, threshold CDFs, contract series in normalized/comparable form; let the analyst spot the patterns like an institutional quant desk
+5. **Weather is the most tractable alpha source** — retail participants not using ECMWF/GFS ensemble forecasts; physical variable is directly measurable
+6. **Sports: use Vegas/FanDuel as the reference model** — deep, liquid, and accurate
+7. **Macro/Fed: use CME FedWatch** — gives exact implied probabilities from Fed funds futures; fit Markov path model for conditional probabilities
+8. **Skip Crypto** — too many sophisticated participants
+9. **Avoid Politics** — high adverse selection, insider risk, not systematic
+10. **Liquidity filters are mandatory** — without them the dashboard is noise
+11. **Kelly sizing with hard caps** — size = f(edge, spread, bankroll); hard cap per contract/topic/venue
+12. **Dashboard is Streamlit** — browser-based, `localhost:8501`, wide layout, manual refresh + filter controls
+13. **Contracts must share terms within series** — compare "Fed rate decision" across months (same terms, different expiry), never apples-to-oranges
+14. **Don't mess with weirdly-termed contracts** — stick to standardized series even if oddball contracts have edge (execution risk too high)
+15. **Feed pagination is capped** — Kalshi max 5 pages (1000 markets), Polymarket max 5 pages (2500 markets), with inter-page sleep to avoid 429s; both fetched in parallel via ThreadPoolExecutor
+16. **Edge definition is not binary** — every contract/series carries raw metrics (bid/ask/mid/spread/volume/OI/close_time); the `metadata` dict on Edge objects holds fitted distribution params, residuals, etc. The dashboard surfaces all of this, not just a pass/fail flag
 
 ---
 
 ## 7. Open Questions / Decisions Needed
 
-1. **Dashboard technology:** Streamlit (simplest) vs Textual (terminal) vs Dash (richest)?
-2. **Market matching:** Curated mapping file (manual, precise) vs NLP similarity (automated, fuzzy) vs hybrid?
+1. ~~**Dashboard technology:**~~ **Resolved: Streamlit.** `src/dashboard/streamlit_app.py`, `make dashboard`.
+2. **Market matching:** Curated mapping file (manual, precise) vs NLP similarity (automated, fuzzy) vs hybrid? Currently using fuzzy SequenceMatcher + same-topic + date proximity. Cross-venue match quality is low — `config/matched_pairs.json` not yet populated. **Next: build curated pairs for highest-volume overlapping series.**
 3. **Weather reference model source:** NWS API (free, US-only) vs ECMWF API (subscription, global)?
-4. **Update frequency:** How often to poll APIs? (Leaning: 60s for markets, 30s for active positions)
-5. **Liquidity filter defaults:** Min daily volume ($500?), max bid-ask spread (10¢?), min OI (200 contracts?)
-6. **Bankroll for Kelly:** What total bankroll to parameterize against?
+4. **Update frequency:** How often to poll APIs? (Leaning: 60s for markets, 30s for active positions). Manual refresh implemented for now.
+5. **Liquidity filter defaults:** Sidebar sliders default to 0 (show everything). Good for exploration. Tighten defaults once you know which series matter.
+6. **Bankroll for Kelly:** Defaults to $10,000 via `RV_BANKROLL` env var. Set in `.env`.
 7. **Backtest mode:** Should the RV system also run historically against stored Parquet data?
+8. **Reference model wiring:** `model_vs_market` edge type exists in `edge.py` but nothing passes `reference_probs` yet. NWS weather, CME FedWatch, Vegas odds all need a fetcher module to wire in.
 
 ---
 
@@ -211,4 +222,4 @@ make setup                           # download 36GiB historical dataset
 
 ---
 
-*Last updated: 2026-02-21 — Phase 1 complete: src/rv/ modules + 80 tests all passing.*
+*Last updated: 2026-02-22 — Phase 2 complete: src/live/ feeds (parallel, rate-limit safe). Phase 3 complete: Streamlit research dashboard (`make dashboard`). Dashboard philosophy shifted from edge-alert system to full market-structure research surface.*

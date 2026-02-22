@@ -1,6 +1,9 @@
-.PHONY: analyze run index package lint format test setup
+.PHONY: analyze run index package dashboard lint format test setup
 
 RUN = uv run main.py
+
+dashboard:
+	uv run streamlit run src/dashboard/streamlit_app.py
 
 analyze:
 	$(RUN) analyze
