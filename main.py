@@ -132,10 +132,17 @@ def package():
     sys.exit(0 if success else 1)
 
 
+def dashboard(once: bool = False):
+    """Run the live RV dashboard."""
+    from src.dashboard.app import main as dashboard_main
+
+    dashboard_main(once=once)
+
+
 def main():
     if len(sys.argv) < 2:
         print("\nUsage: uv run main.py <command>")
-        print("Commands: analyze, index, package")
+        print("Commands: analyze, index, package, dashboard")
         sys.exit(0)
 
     command = sys.argv[1]
@@ -153,8 +160,13 @@ def main():
         package()
         sys.exit(0)
 
+    if command == "dashboard":
+        once = "--once" in sys.argv
+        dashboard(once=once)
+        sys.exit(0)
+
     print(f"Unknown command: {command}")
-    print("Commands: analyze, index, package")
+    print("Commands: analyze, index, package, dashboard")
     sys.exit(1)
 
 
