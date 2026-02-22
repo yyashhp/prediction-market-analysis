@@ -3,7 +3,7 @@
 RUN = uv run main.py
 
 dashboard:
-	uv run streamlit run src/dashboard/streamlit_app.py
+	PYTHONPATH=. uv run streamlit run src/dashboard/streamlit_app.py
 
 analyze:
 	$(RUN) analyze
