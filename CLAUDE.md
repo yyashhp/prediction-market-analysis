@@ -177,6 +177,10 @@ make setup                           # download 36GiB historical dataset
 | 1 | `categories.py` `get_group()` uses substring matching (`pattern in string`), so "EC" matches inside "FEDDECISION" → classified as Electoral College instead of Finance/Fed | Built `_get_group_prefix()` in `classifier.py` that extracts the alphabetic prefix and does longest-prefix-first matching. Never use `get_group()` directly for the RV system. |
 | 2 | Polymarket classifier: "win" keyword in Sports regex triggered on political/entertainment questions ("win the Senate", "win the Oscar") | Reordered `_POLYMARKET_PATTERNS` so Politics and Entertainment are checked before Sports. Removed generic "win the" from Sports pattern; kept only specific sports terms. |
 | 3 | Float comparison `assert q.spread == 0.02` fails due to floating point precision (0.57 - 0.55 = 0.01999...9907) | Always use `abs(a - b) < 1e-10` or `pytest.approx()` for float comparisons. Never `==` on floats. |
+| 4 | `api.elections.kalshi.com` is Kalshi's elections-only subdomain — returns almost exclusively political markets. Default topic filter `["weather", "sports", "macro"]` filtered all of them → 0 Kalshi shown. | Changed dashboard default topics to ALL topics. The research surface should show everything by default; the analyst narrows from there. The API limitation (elections-only URL) is a known constraint. |
+| 5 | Polymarket `Market.from_dict` dropped `bestBid`, `bestAsk`, `spread`, `volume24Hr` — gamma API returns them but the model didn't capture them. Feed then reconstructed a stripped dict, so `from_polymarket` never saw bid/ask/spread/vol24h. | Added `best_bid`, `best_ask`, `spread`, `volume_24h` fields to `src/indexers/polymarket/models.py`. Updated `PolymarketFeed` to pass them through. Updated `from_polymarket` to use them. |
+| 6 | Polymarket `event_group` set to the market's own unique `slug` → every market is a group of 1 → no event groups, no series detected. | Added `_polymarket_group_slug()` in `normalizer.py`: strips trailing month names and 4-digit years from the slug, so related series contracts (e.g. "fed-cut-march-2026", "fed-cut-april-2026") share the group key "fed-cut". |
+| 7 | Polymarket OI always 0 — true open interest is not in the gamma API. | Use `liquidity` ($) as an OI proxy. It's not identical but both measure depth. Dashboard tooltip now clarifies: "Kalshi: OI (contracts). Polymarket: liquidity ($)." |
 
 ---
 
@@ -222,4 +226,4 @@ make setup                           # download 36GiB historical dataset
 
 ---
 
-*Last updated: 2026-02-22 — Phase 2 complete: src/live/ feeds (parallel, rate-limit safe). Phase 3 complete: Streamlit research dashboard (`make dashboard`). Dashboard philosophy shifted from edge-alert system to full market-structure research surface.*
+*Last updated: 2026-02-23 — Dashboard data quality fixes: Polymarket bid/ask/spread/vol24h now populated from gamma API fields; OI proxied by liquidity; event_group uses slug-stripping for series detection; default topic filter changed to ALL topics so Kalshi elections-API markets appear; Market Browser no longer shows ID/Event Group columns.*

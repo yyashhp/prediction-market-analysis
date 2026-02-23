@@ -7,8 +7,39 @@ into a unified probability space for apples-to-apples comparison.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from datetime import datetime
+
+# Month names used to strip trailing date tokens from Polymarket slugs
+_SLUG_MONTHS = {
+    "january", "february", "march", "april", "may", "june",
+    "july", "august", "september", "october", "november", "december",
+    "jan", "feb", "mar", "apr", "jun", "jul", "aug", "sep", "oct", "nov", "dec",
+}
+
+
+def _polymarket_group_slug(slug: str) -> str:
+    """Extract a shared group key from a Polymarket market slug.
+
+    Strips trailing month names and 4-digit years so that related series
+    contracts share the same group key. For example:
+        "will-the-fed-cut-rates-march-2026"  → "will-the-fed-cut-rates"
+        "will-the-fed-cut-rates-april-2026"  → "will-the-fed-cut-rates"
+
+    This enables term-structure series detection across Polymarket markets
+    that represent the same event at different resolution dates.
+    """
+    if not slug:
+        return slug
+    tokens = slug.split("-")
+    while tokens:
+        last = tokens[-1].lower()
+        if re.match(r"^\d{4}$", last) or last in _SLUG_MONTHS:
+            tokens.pop()
+        else:
+            break
+    return "-".join(tokens) if tokens else slug
 
 
 @dataclass
@@ -94,6 +125,10 @@ def from_polymarket(market: dict) -> NormalizedQuote:
     """Normalize a Polymarket market dict to probability space.
 
     Polymarket prices are decimals (0-1) stored as JSON strings in outcome_prices.
+    Bid/ask come from the gamma API's bestBid/bestAsk fields (present on liquid markets).
+    OI is proxied by liquidity (genuinely not available from the gamma API).
+    event_group uses _polymarket_group_slug to strip trailing month/year tokens so
+    related series markets share a common group key for series detection.
     """
     outcome_prices_raw = market.get("outcome_prices", market.get("outcomePrices", "[]"))
     if isinstance(outcome_prices_raw, str):
@@ -114,13 +149,20 @@ def from_polymarket(market: dict) -> NormalizedQuote:
     else:
         prob_mid = 0.5
 
-    # Polymarket doesn't expose raw bid/ask in the gamma API — mid price only
-    # The spread can be estimated from orderbook data if available
+    # Gamma API returns bestBid/bestAsk as floats or None
     best_bid = market.get("bestBid")
     best_ask = market.get("bestAsk")
     prob_bid = float(best_bid) if best_bid is not None else None
     prob_ask = float(best_ask) if best_ask is not None else None
-    spread = (prob_ask - prob_bid) if (prob_bid is not None and prob_ask is not None) else None
+
+    # Prefer the API's spread field if available, otherwise compute from bid/ask
+    raw_spread = market.get("spread")
+    if raw_spread is not None:
+        spread = float(raw_spread)
+    elif prob_bid is not None and prob_ask is not None:
+        spread = prob_ask - prob_bid
+    else:
+        spread = None
 
     end_date = market.get("end_date", market.get("endDate"))
     close_time = None
@@ -132,6 +174,10 @@ def from_polymarket(market: dict) -> NormalizedQuote:
     elif isinstance(end_date, datetime):
         close_time = end_date
 
+    slug = market.get("slug", "")
+    # Use liquidity as an OI proxy — it's the closest available metric from the gamma API
+    liquidity = int(float(market.get("liquidity", 0) or 0))
+
     return NormalizedQuote(
         market_id=market.get("id", market.get("condition_id", "")),
         title=market.get("question", ""),
@@ -141,10 +187,10 @@ def from_polymarket(market: dict) -> NormalizedQuote:
         prob_bid=prob_bid,
         prob_ask=prob_ask,
         spread=spread,
-        volume_24h=0.0,  # Polymarket gamma API doesn't expose 24h volume directly
-        open_interest=0,  # Not directly available from gamma API
+        volume_24h=float(market.get("volume24Hr") or market.get("volume24hr") or 0),
+        open_interest=liquidity,  # proxy: liquidity ≈ depth; true OI not in gamma API
         total_volume=float(market.get("volume", 0) or 0),
-        event_group=market.get("slug", ""),
+        event_group=_polymarket_group_slug(slug),
         close_time=close_time,
         raw=market,
     )

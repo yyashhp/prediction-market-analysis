@@ -68,6 +68,11 @@ class PolymarketFeed:
                             "active": market.active,
                             "closed": market.closed,
                             "endDate": market.end_date.isoformat() if market.end_date else None,
+                            # Bid/ask/spread/vol24h from gamma API (populated on liquid markets)
+                            "bestBid": market.best_bid,
+                            "bestAsk": market.best_ask,
+                            "spread": market.spread,
+                            "volume24Hr": market.volume_24h,
                         }
                         quote = from_polymarket(market_data)
                         topic = classify_polymarket(

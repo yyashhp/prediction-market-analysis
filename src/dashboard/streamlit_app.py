@@ -69,11 +69,9 @@ def _quotes_to_df(quotes: list[NormalizedQuote]) -> pd.DataFrame:
     for q in quotes:
         rows.append(
             {
-                "ID": q.market_id,
                 "Title": q.title,
                 "Venue": q.venue.capitalize(),
                 "Topic": q.topic.capitalize() if q.topic else "—",
-                "Event Group": q.event_group or "—",
                 "Mid": round(q.prob_mid_or_last, 4),
                 "Bid": round(q.prob_bid, 4) if q.prob_bid is not None else None,
                 "Ask": round(q.prob_ask, 4) if q.prob_ask is not None else None,
@@ -220,10 +218,11 @@ with st.sidebar:
 
     st.markdown("---")
 
+    _all_topics = ["weather", "sports", "macro", "crypto", "politics", "entertainment", "other"]
     selected_topics = st.multiselect(
         "Topics",
-        options=["weather", "sports", "macro", "crypto", "politics", "entertainment", "other"],
-        default=["weather", "sports", "macro"],
+        options=_all_topics,
+        default=_all_topics,  # show everything by default — filter down as needed
         format_func=str.capitalize,
     )
 
@@ -318,7 +317,6 @@ with tab_browser:
             use_container_width=True,
             hide_index=True,
             column_config={
-                "ID": st.column_config.TextColumn("Market ID", width="medium"),
                 "Title": st.column_config.TextColumn("Title", width="large"),
                 "Mid": st.column_config.ProgressColumn(
                     "Mid prob",
@@ -330,9 +328,13 @@ with tab_browser:
                 "Bid": st.column_config.NumberColumn("Bid", format="%.3f"),
                 "Ask": st.column_config.NumberColumn("Ask", format="%.3f"),
                 "Spread pp": st.column_config.NumberColumn("Spread (pp)", format="%.2f"),
-                "Vol 24h": st.column_config.NumberColumn("Vol 24h", format="$%,.0f"),
-                "OI": st.column_config.NumberColumn("OI", format="%,d"),
-                "Total Vol": st.column_config.NumberColumn("Total Vol", format="$%,.0f"),
+                "Vol 24h": st.column_config.NumberColumn("Vol 24h ($)", format="$%,.0f"),
+                "OI": st.column_config.NumberColumn(
+                    "OI / Liq",
+                    help="Kalshi: open interest (contracts). Polymarket: liquidity ($) — proxy for depth.",
+                    format="%,d",
+                ),
+                "Total Vol": st.column_config.NumberColumn("Total Vol ($)", format="$%,.0f"),
                 "Closes": st.column_config.DateColumn("Closes"),
             },
         )

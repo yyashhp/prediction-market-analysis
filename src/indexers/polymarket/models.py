@@ -19,6 +19,11 @@ class Market:
     end_date: Optional[datetime]
     created_at: Optional[datetime]
     market_maker_address: Optional[str] = None  # FPMM address for legacy markets
+    # Fields returned by gamma API bulk endpoint but not always present
+    best_bid: Optional[float] = None
+    best_ask: Optional[float] = None
+    spread: Optional[float] = None
+    volume_24h: float = 0.0
 
     @classmethod
     def from_dict(cls, data: dict) -> "Market":
@@ -29,6 +34,15 @@ class Market:
                 # Handle ISO format with Z suffix
                 val = val.replace("Z", "+00:00")
                 return datetime.fromisoformat(val)
+            except (ValueError, TypeError):
+                return None
+
+        def parse_float(val) -> Optional[float]:
+            if val is None:
+                return None
+            try:
+                f = float(val)
+                return f if f > 0 else None
             except (ValueError, TypeError):
                 return None
 
@@ -47,6 +61,11 @@ class Market:
             end_date=parse_time(data.get("endDate")),
             created_at=parse_time(data.get("createdAt")),
             market_maker_address=data.get("marketMakerAddress"),
+            best_bid=parse_float(data.get("bestBid")),
+            best_ask=parse_float(data.get("bestAsk")),
+            spread=parse_float(data.get("spread")),
+            # gamma API returns "volume24Hr" (capital H) or "volume24hr"
+            volume_24h=float(data.get("volume24Hr") or data.get("volume24hr") or 0),
         )
 
 
