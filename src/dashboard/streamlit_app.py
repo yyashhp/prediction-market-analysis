@@ -85,6 +85,74 @@ def _quotes_to_df(quotes: list[NormalizedQuote]) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def _polymarket_quotes_to_df(quotes: list[NormalizedQuote]) -> pd.DataFrame:
+    """Flat table for Polymarket binary Yes/No questions."""
+    rows = []
+    for q in quotes:
+        rows.append(
+            {
+                "Question": q.title,
+                "Topic": q.topic.capitalize() if q.topic else "—",
+                "Mid": round(q.prob_mid_or_last, 4),
+                "Bid": round(q.prob_bid, 4) if q.prob_bid is not None else None,
+                "Ask": round(q.prob_ask, 4) if q.prob_ask is not None else None,
+                "Spread pp": round(q.spread * 100, 2) if q.spread is not None else None,
+                "Vol 24h": round(q.volume_24h or 0),
+                "Liquidity": q.open_interest or 0,
+                "Total Vol": round(q.total_volume or 0),
+                "Closes": q.close_time.date() if q.close_time else None,
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def _kalshi_events_summary_df(kalshi_quotes: list[NormalizedQuote]) -> pd.DataFrame:
+    """One row per Kalshi event group: Event, Topic, # Outcomes, Best Spread, Total Vol, Closes."""
+    groups: dict[str, list[NormalizedQuote]] = {}
+    for q in kalshi_quotes:
+        key = q.event_group or q.market_id
+        groups.setdefault(key, []).append(q)
+
+    rows = []
+    for event_key, gq in groups.items():
+        topic = gq[0].topic.capitalize() if gq[0].topic else "—"
+        spreads = [q.spread for q in gq if q.spread is not None]
+        best_spread = round(min(spreads) * 100, 2) if spreads else None
+        total_vol = sum(q.total_volume or 0 for q in gq)
+        close_times = [q.close_time for q in gq if q.close_time]
+        closes = min(close_times).date() if close_times else None
+        rows.append(
+            {
+                "Event": event_key,
+                "Topic": topic,
+                "Outcomes": len(gq),
+                "Best Spread pp": best_spread,
+                "Total Vol ($)": round(total_vol),
+                "Closes": closes,
+            }
+        )
+    return pd.DataFrame(rows).sort_values("Total Vol ($)", ascending=False).reset_index(drop=True)
+
+
+def _kalshi_outcomes_df(quotes: list[NormalizedQuote]) -> pd.DataFrame:
+    """Per-outcome detail table for a single Kalshi event (prices shown in cents 1–99)."""
+    rows = []
+    for q in sorted(quotes, key=lambda q: q.prob_mid_or_last, reverse=True):
+        rows.append(
+            {
+                "Outcome": q.title,
+                "Yes Mid %": round(q.prob_mid_or_last * 100, 1),
+                "Yes Bid ¢": round(q.prob_bid * 100) if q.prob_bid is not None else None,
+                "Yes Ask ¢": round(q.prob_ask * 100) if q.prob_ask is not None else None,
+                "Spread pp": round(q.spread * 100, 2) if q.spread is not None else None,
+                "Vol 24h ($)": round(q.volume_24h or 0),
+                "OI": q.open_interest or 0,
+                "Closes": q.close_time.date() if q.close_time else None,
+            }
+        )
+    return pd.DataFrame(rows)
+
+
 def _term_structure_chart(
     series_by_venue: dict[str, list[NormalizedQuote]],
     title: str,
@@ -291,9 +359,10 @@ st.markdown("---")
 
 # ─── Tabs ─────────────────────────────────────────────────────────────────────
 
-tab_browser, tab_groups, tab_term, tab_cdf = st.tabs(
+tab_poly, tab_kalshi, tab_groups, tab_term, tab_cdf = st.tabs(
     [
-        "📋  Market Browser",
+        "📊  Polymarket",
+        "🎯  Kalshi Events",
         "🔗  Event Groups",
         "📈  Term Structures",
         "📉  Threshold CDFs",
@@ -301,43 +370,120 @@ tab_browser, tab_groups, tab_term, tab_cdf = st.tabs(
 )
 
 # ════════════════════════════════════════════════════════════════════════════════
-# TAB 1 — Market Browser
-# Flat sortable/filterable table of every fetched contract.
+# TAB 1 — Polymarket
+# Flat table of binary Yes/No questions from Polymarket.
+# Each row is one question with a single bid/ask/mid.
 # ════════════════════════════════════════════════════════════════════════════════
 
-with tab_browser:
-    st.markdown(f"**{len(all_shown):,} contracts** · {len(kalshi_shown)} Kalshi · {len(poly_shown)} Polymarket")
+with tab_poly:
+    st.markdown(f"**{len(poly_shown):,} binary markets** from Polymarket")
 
-    if not all_shown:
-        st.info("No contracts match the current filters.")
+    if not poly_shown:
+        st.info("No Polymarket contracts match the current filters.")
     else:
-        df = _quotes_to_df(all_shown)
+        df_poly = _polymarket_quotes_to_df(poly_shown)
         st.dataframe(
-            df,
+            df_poly,
             use_container_width=True,
             hide_index=True,
             column_config={
-                "Title": st.column_config.TextColumn("Title", width="large"),
+                "Question": st.column_config.TextColumn("Question", width="large"),
                 "Mid": st.column_config.ProgressColumn(
-                    "Mid prob",
-                    help="Implied probability (0–1). Bar fill = probability.",
+                    "Mid (Yes %)",
+                    help="Implied probability of Yes outcome (0–1). Bar fill = probability.",
                     min_value=0.0,
                     max_value=1.0,
                     format="%.3f",
                 ),
-                "Bid": st.column_config.NumberColumn("Bid", format="%.3f"),
-                "Ask": st.column_config.NumberColumn("Ask", format="%.3f"),
+                "Bid": st.column_config.NumberColumn("Bid (Yes)", format="%.3f"),
+                "Ask": st.column_config.NumberColumn("Ask (Yes)", format="%.3f"),
                 "Spread pp": st.column_config.NumberColumn("Spread (pp)", format="%.2f"),
                 "Vol 24h": st.column_config.NumberColumn("Vol 24h ($)", format="$%,.0f"),
-                "OI": st.column_config.NumberColumn(
-                    "OI / Liq",
-                    help="Kalshi: open interest (contracts). Polymarket: liquidity ($) — proxy for depth.",
-                    format="%,d",
+                "Liquidity": st.column_config.NumberColumn(
+                    "Liquidity ($)",
+                    help="Liquidity depth in USDC — proxy for open interest (true OI not in gamma API).",
+                    format="$%,.0f",
                 ),
                 "Total Vol": st.column_config.NumberColumn("Total Vol ($)", format="$%,.0f"),
                 "Closes": st.column_config.DateColumn("Closes"),
             },
         )
+
+# ════════════════════════════════════════════════════════════════════════════════
+# TAB 2 — Kalshi Events
+# Kalshi markets grouped by event (event_ticker). Each event can have multiple
+# outcome sub-markets (e.g. "Fed cuts ≥25bp", "≥50bp", "≥75bp"). Shows an
+# event summary table, then a selectbox to drill into individual outcomes.
+# ════════════════════════════════════════════════════════════════════════════════
+
+with tab_kalshi:
+    # Build event groups
+    _kalshi_groups: dict[str, list[NormalizedQuote]] = {}
+    for _q in kalshi_shown:
+        _key = _q.event_group or _q.market_id
+        _kalshi_groups.setdefault(_key, []).append(_q)
+
+    n_events = len(_kalshi_groups)
+    st.markdown(f"**{len(kalshi_shown):,} markets** across **{n_events:,} events** from Kalshi")
+
+    if not kalshi_shown:
+        st.info("No Kalshi contracts match the current filters.")
+    else:
+        # ── Event summary table ───────────────────────────────────────────────
+        st.markdown("##### All Events")
+        summary_df = _kalshi_events_summary_df(kalshi_shown)
+        st.dataframe(
+            summary_df,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Event": st.column_config.TextColumn("Event Ticker", width="medium"),
+                "Topic": st.column_config.TextColumn("Topic"),
+                "Outcomes": st.column_config.NumberColumn("# Outcomes", format="%d"),
+                "Best Spread pp": st.column_config.NumberColumn("Best Spread (pp)", format="%.2f"),
+                "Total Vol ($)": st.column_config.NumberColumn("Total Vol ($)", format="$%,.0f"),
+                "Closes": st.column_config.DateColumn("Closes"),
+            },
+        )
+
+        # ── Outcome drill-down ────────────────────────────────────────────────
+        st.markdown("##### Outcome Detail")
+        sorted_event_keys = list(summary_df["Event"])
+        sel_event = st.selectbox(
+            f"Select event ({n_events} events — sorted by total volume)",
+            options=sorted_event_keys,
+            format_func=lambda k: (
+                f"{k}  [{len(_kalshi_groups.get(k, []))} outcomes]  "
+                f"${sum(q.total_volume or 0 for q in _kalshi_groups.get(k, [])):,.0f} total vol"
+            ),
+        )
+
+        if sel_event:
+            event_quotes = _kalshi_groups.get(sel_event, [])
+            topic_label = event_quotes[0].topic.capitalize() if event_quotes and event_quotes[0].topic else "—"
+            st.markdown(f"**{sel_event}** &nbsp;·&nbsp; {topic_label} &nbsp;·&nbsp; {len(event_quotes)} outcomes")
+            outcomes_df = _kalshi_outcomes_df(event_quotes)
+            st.dataframe(
+                outcomes_df,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Outcome": st.column_config.TextColumn("Outcome", width="large"),
+                    "Yes Mid %": st.column_config.ProgressColumn(
+                        "Yes Mid %",
+                        help="Implied probability of Yes outcome. Bar fill = probability.",
+                        min_value=0,
+                        max_value=100,
+                        format="%.1f%%",
+                    ),
+                    "Yes Bid ¢": st.column_config.NumberColumn("Yes Bid ¢", format="%d¢"),
+                    "Yes Ask ¢": st.column_config.NumberColumn("Yes Ask ¢", format="%d¢"),
+                    "Spread pp": st.column_config.NumberColumn("Spread (pp)", format="%.2f"),
+                    "Vol 24h ($)": st.column_config.NumberColumn("Vol 24h ($)", format="$%,.0f"),
+                    "OI": st.column_config.NumberColumn("OI (contracts)", format="%,d"),
+                    "Closes": st.column_config.DateColumn("Closes"),
+                },
+            )
 
 # ════════════════════════════════════════════════════════════════════════════════
 # TAB 2 — Event Groups
