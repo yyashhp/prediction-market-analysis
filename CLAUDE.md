@@ -181,6 +181,11 @@ make setup                           # download 36GiB historical dataset
 | 5 | Polymarket `Market.from_dict` dropped `bestBid`, `bestAsk`, `spread`, `volume24Hr` — gamma API returns them but the model didn't capture them. Feed then reconstructed a stripped dict, so `from_polymarket` never saw bid/ask/spread/vol24h. | Added `best_bid`, `best_ask`, `spread`, `volume_24h` fields to `src/indexers/polymarket/models.py`. Updated `PolymarketFeed` to pass them through. Updated `from_polymarket` to use them. |
 | 6 | Polymarket `event_group` set to the market's own unique `slug` → every market is a group of 1 → no event groups, no series detected. | Added `_polymarket_group_slug()` in `normalizer.py`: strips trailing month names and 4-digit years from the slug, so related series contracts (e.g. "fed-cut-march-2026", "fed-cut-april-2026") share the group key "fed-cut". |
 | 7 | Polymarket OI always 0 — true open interest is not in the gamma API. | Use `liquidity` ($) as an OI proxy. It's not identical but both measure depth. Dashboard tooltip now clarifies: "Kalshi: OI (contracts). Polymarket: liquidity ($)." |
+| 8 | KX-prefix Kalshi event tickers (e.g. `KXMVESPORTSMULTIGAMEEXTENDED`) not in `SUBCATEGORY_PATTERNS` → classified as "Other"; title fallback also failed because titles are garbled outcome descriptions. | Added `_KX_KEYWORD_MAP` in `classifier.py` — if prefix lookup returns Other, scan event_ticker for topic keywords like "SPORTS", "CRYPTO", "FED". |
+| 9 | Kalshi multi-leg parlay titles start with "yes " ("yes Josh Giddey: 15+,yes Josh Giddey: 6+") — garbled outcome descriptions, not human-readable questions. | Added `_clean_kalshi_title()` in `normalizer.py`: strips "yes "/"no " prefixes, joins with " & "; also tries `subtitle` field as fallback. |
+| 10 | `_extract_threshold` matched "15+" via bare `\+` pattern → player props (points, rebounds) falsely formed "threshold series". | Removed bare `\+` from the pattern. Real threshold markets use "above", "over", "or more" etc. which are matched by other patterns. |
+| 11 | Kalshi MULTIGAME event tickers share one `event_ticker` across hundreds of unrelated parlays → spurious term structure / threshold series detected. | In `from_kalshi`, if `event_ticker` contains "MULTIGAME", use the market `ticker` (unique per parlay) as `event_group` instead. |
+| 12 | Dashboard Threshold CDFs tab crashed with `KeyError: 'ID'` after "ID" column was removed from `_quotes_to_df`. | Fixed: build threshold list from contracts directly instead of joining via DataFrame column. |
 
 ---
 
@@ -226,4 +231,4 @@ make setup                           # download 36GiB historical dataset
 
 ---
 
-*Last updated: 2026-02-23 — Dashboard data quality fixes: Polymarket bid/ask/spread/vol24h now populated from gamma API fields; OI proxied by liquidity; event_group uses slug-stripping for series detection; default topic filter changed to ALL topics so Kalshi elections-API markets appear; Market Browser no longer shows ID/Event Group columns.*
+*Last updated: 2026-02-24 — Dashboard data quality fixes: Polymarket bid/ask/spread/vol24h now populated from gamma API fields; OI proxied by liquidity; event_group uses slug-stripping for series detection; default topic filter changed to ALL topics so Kalshi elections-API markets appear; Market Browser no longer shows ID/Event Group columns. Round 2: KX-prefix topic classification, Kalshi parlay title cleanup, _extract_threshold false positive fix (bare \+), MULTIGAME event_group fix, CDF tab KeyError fix.*

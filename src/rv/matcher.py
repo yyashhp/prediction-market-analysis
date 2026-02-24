@@ -209,12 +209,14 @@ def _extract_threshold(title: str) -> float | None:
         "Bitcoin above $100,000"  → 100000.0
     """
     # Pattern: "above/over/exceed/at least" + number
+    # NOTE: bare "\+" was removed — it matched player props like "15+" (points)
+    # which are NOT threshold series. Real threshold markets use "above", "or more", etc.
     patterns = [
         r"(?:above|over|exceed|at least|greater than|more than|≥|>=)\s*\$?([\d,]+\.?\d*)",
         r"(?:below|under|less than|at most|≤|<=)\s*\$?([\d,]+\.?\d*)",
         r"(?:between)\s*\$?([\d,]+\.?\d*)\s*(?:and|to|-)\s*\$?([\d,]+\.?\d*)",
-        # "X or more" pattern
-        r"\$?([\d,]+\.?\d*)\s*(?:or more|or higher|or above|\+)",
+        # "X or more" pattern (no bare \+ — too many false positives on player props)
+        r"\$?([\d,]+\.?\d*)\s*(?:or more|or higher|or above)",
     ]
 
     for pattern in patterns:

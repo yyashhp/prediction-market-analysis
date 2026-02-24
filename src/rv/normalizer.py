@@ -77,6 +77,41 @@ class NormalizedQuote:
         return self.prob_mid
 
 
+def _clean_kalshi_title(market: dict) -> str:
+    """Clean Kalshi market title for display.
+
+    Multi-leg parlay markets have titles like "yes Josh Giddey: 15+,yes Josh Giddey: 6+"
+    — these are outcome descriptions, not human-readable questions.
+    Clean by stripping "yes "/"no " prefixes and joining with " & ".
+    Also tries the subtitle field as fallback.
+    """
+    title = market.get("title", "")
+    if not title:
+        return title
+
+    # Check if title looks like concatenated outcomes (starts with "yes " or "no ")
+    lower = title.lower()
+    if not (lower.startswith("yes ") or lower.startswith("no ")):
+        return title
+
+    # Prefer subtitle if it looks cleaner
+    subtitle = market.get("subtitle", "")
+    if subtitle and not subtitle.lower().startswith("yes "):
+        return subtitle
+
+    # Clean up: split on commas, strip "yes "/"no " prefix from each part
+    parts = [p.strip() for p in title.split(",")]
+    cleaned = []
+    for p in parts:
+        if p.lower().startswith("yes "):
+            cleaned.append(p[4:])
+        elif p.lower().startswith("no "):
+            cleaned.append(p[3:])
+        else:
+            cleaned.append(p)
+    return " & ".join(cleaned)
+
+
 def from_kalshi(market: dict) -> NormalizedQuote:
     """Normalize a Kalshi market dict to probability space.
 
@@ -103,9 +138,17 @@ def from_kalshi(market: dict) -> NormalizedQuote:
         except (ValueError, TypeError):
             close_time = None
 
+    # Use ticker (not event_ticker) for multi-game events so each parlay stays
+    # in its own group — prevents spurious series detection across unrelated parlays.
+    event_ticker = market.get("event_ticker", "")
+    if "MULTIGAME" in event_ticker.upper():
+        event_group = market.get("ticker", event_ticker)
+    else:
+        event_group = event_ticker
+
     return NormalizedQuote(
         market_id=market.get("ticker", ""),
-        title=market.get("title", ""),
+        title=_clean_kalshi_title(market),
         venue="kalshi",
         topic="",  # assigned by classifier
         prob_mid=prob_mid,
@@ -115,7 +158,7 @@ def from_kalshi(market: dict) -> NormalizedQuote:
         volume_24h=float(market.get("volume_24h", 0)),
         open_interest=int(market.get("open_interest", 0)),
         total_volume=float(market.get("volume", 0)),
-        event_group=market.get("event_ticker", ""),
+        event_group=event_group,
         close_time=close_time,
         raw=market,
     )

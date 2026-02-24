@@ -169,7 +169,9 @@ def classify_kalshi(
     Uses longest-prefix matching on event_ticker against the categories
     taxonomy, then maps the group to our Topic enum.
 
-    Falls back to keyword matching on title if event_ticker is empty.
+    Falls back to:
+    1. KX-style ticker keyword scan (event_ticker contains "SPORTS", etc.)
+    2. Keyword matching on title.
     """
     # Check overrides first
     overrides = _load_overrides(overrides_path)
@@ -183,6 +185,12 @@ def classify_kalshi(
         if topic != Topic.OTHER:
             return topic
 
+        # KX-prefix tickers embed topic keywords (e.g. KXMVESPORTSMULTIGAME…)
+        et_upper = event_ticker.upper()
+        for kw, kw_topic in _KX_KEYWORD_MAP:
+            if kw in et_upper:
+                return kw_topic
+
     # Fallback: keyword match on title
     if title:
         for pattern, topic in _POLYMARKET_PATTERNS:
@@ -190,6 +198,27 @@ def classify_kalshi(
                 return topic
 
     return Topic.OTHER
+
+
+# Keywords to look for inside KX-prefix event tickers (order: most specific first)
+_KX_KEYWORD_MAP: list[tuple[str, Topic]] = [
+    ("ESPORTS", Topic.SPORTS),
+    ("SPORTS", Topic.SPORTS),
+    ("CRYPTO", Topic.CRYPTO),
+    ("BTC", Topic.CRYPTO),
+    ("ETH", Topic.CRYPTO),
+    ("WEATHER", Topic.WEATHER),
+    ("CLIMATE", Topic.WEATHER),
+    ("TEMP", Topic.WEATHER),
+    ("FEDDECISION", Topic.MACRO),
+    ("FED", Topic.MACRO),
+    ("CPI", Topic.MACRO),
+    ("GDP", Topic.MACRO),
+    ("INFLATION", Topic.MACRO),
+    ("POLITICS", Topic.POLITICS),
+    ("ELECTION", Topic.POLITICS),
+    ("ENTERTAINMENT", Topic.ENTERTAINMENT),
+]
 
 
 def classify_polymarket(

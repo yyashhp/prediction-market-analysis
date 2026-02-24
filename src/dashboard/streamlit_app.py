@@ -525,6 +525,6 @@ with tab_cdf:
 
         # Contracts table with threshold column injected
         df_cdf = _quotes_to_df(s.contracts)
-        threshold_map = {q.market_id: t for q, t in pts_clean}
-        df_cdf.insert(5, "Threshold", df_cdf["ID"].map(threshold_map))
+        thresholds = [_extract_threshold(q.title) for q in s.contracts]
+        df_cdf.insert(1, "Threshold", thresholds)
         st.dataframe(df_cdf, use_container_width=True, hide_index=True)
