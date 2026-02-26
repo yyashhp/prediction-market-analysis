@@ -8,6 +8,10 @@ from src.indexers.kalshi.models import Market, Trade
 
 KALSHI_API_HOST = "https://api.elections.kalshi.com/trade-api/v2"
 
+# The main Kalshi trading API has non-elections markets (entertainment, sports, crypto, etc.)
+# GET /markets is publicly accessible without authentication for read-only browsing.
+KALSHI_TRADING_HOST = "https://trading-api.kalshi.com/trade-api/v2"
+
 
 class KalshiClient:
     def __init__(self, host: str = KALSHI_API_HOST):

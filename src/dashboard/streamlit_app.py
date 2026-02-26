@@ -445,7 +445,7 @@ st.markdown("---")
 
 # ─── Tabs ─────────────────────────────────────────────────────────────────────
 
-tab_poly, tab_kalshi, tab_edge, tab_groups, tab_term, tab_cdf = st.tabs(
+tab_poly, tab_kalshi, tab_edge, tab_groups, tab_term, tab_cdf, tab_oscar = st.tabs(
     [
         "📊  Polymarket",
         "🎯  Kalshi Events",
@@ -453,6 +453,7 @@ tab_poly, tab_kalshi, tab_edge, tab_groups, tab_term, tab_cdf = st.tabs(
         "🔗  Event Groups",
         "📈  Term Structures",
         "📉  Threshold CDFs",
+        "🏆  Oscar 2026",
     ]
 )
 
@@ -907,3 +908,172 @@ with tab_cdf:
         thresholds = [_extract_threshold(q.title) for q in s.contracts]
         df_cdf.insert(1, "Threshold", thresholds)
         st.dataframe(df_cdf, use_container_width=True, hide_index=True)
+
+# ════════════════════════════════════════════════════════════════════════════════
+# TAB 7 — Oscar 2026
+# Model predictions vs Kalshi market prices for all major categories.
+# Shows model probability, Kalshi price, edge (pp), and Kelly $ for each nominee.
+# ════════════════════════════════════════════════════════════════════════════════
+
+with tab_oscar:
+    from src.analysis.oscar.model import CategoryPrediction, kelly_bet_size, run_all_categories
+
+    st.markdown("### 🏆 98th Academy Awards — Prediction Model vs Kalshi Market")
+    st.caption(
+        "Precursor-correlation model | Scores = ε(0.10 base) + historical correlations | "
+        "Per-category temperatures calibrated to match historical win rates | "
+        "NOT fitted to 2026 data — this is a prior. Update after PGA (Feb 28), SAG (Mar 1), WGA (Mar 8)."
+    )
+
+    oscar_bankroll = float(DashboardConfig.from_env().bankroll)
+
+    col_meta1, col_meta2, col_meta3 = st.columns(3)
+    col_meta1.metric("Ceremony", "Mar 15, 2026")
+    col_meta2.metric("Host", "Conan O'Brien")
+    col_meta3.metric("Bankroll (Kelly sizing)", f"${oscar_bankroll:,.0f}")
+
+    # ── Pending precursors alert ─────────────────────────────────────────────
+    st.info(
+        "⏳ **Pending precursors** — model will strengthen after these results:\n\n"
+        "- **Feb 28** — PGA Awards (Darryl F. Zanuck Award = Best Picture key predictor)\n"
+        "- **Mar 1** — SAG Awards (strongest predictor for Lead Actor, Lead Actress, Supporting)\n"
+        "- **Mar 8** — WGA Awards (Original & Adapted Screenplay)\n\n"
+        "SAG on Mar 1 is especially important. "
+        "Categories with many pending precursors show wider probability spreads."
+    )
+
+    @st.cache_data(ttl=300, show_spinner=False)
+    def _oscar_predictions() -> dict[str, CategoryPrediction]:
+        return run_all_categories()
+
+    oscar_preds = _oscar_predictions()
+
+    # ── Executive summary: top edge opportunities ────────────────────────────
+    st.markdown("#### Top Edge Opportunities")
+
+    edge_rows = []
+    for _slug, cat in oscar_preds.items():
+        for r in cat.nominees:
+            if r.kalshi_price is not None and r.edge_vs_market is not None:
+                kelly = kelly_bet_size(r, oscar_bankroll) or 0.0
+                edge_rows.append(
+                    {
+                        "Category": cat.category_display,
+                        "Nominee": r.nominee,
+                        "Film": r.film,
+                        "Model %": round(r.model_prob * 100, 1),
+                        "Market ¢": round((r.kalshi_price or 0) * 100),
+                        "Edge pp": round((r.edge_vs_market or 0) * 100, 1),
+                        "Kelly $": round(kelly),
+                        "Action": (
+                            f"BUY YES ({round((r.kalshi_price or 0)*100):.0f}¢)"
+                            if (r.edge_vs_market or 0) > 0
+                            else f"BUY NO ({100 - round((r.kalshi_price or 0)*100):.0f}¢)"
+                        ),
+                    }
+                )
+
+    if edge_rows:
+        df_edge = pd.DataFrame(edge_rows)
+        df_edge = df_edge[abs(df_edge["Edge pp"]) >= 3].copy()
+        df_edge = df_edge.sort_values("Edge pp", key=abs, ascending=False).reset_index(drop=True)
+
+        def _color_edge(val: float) -> str:
+            if val > 5:
+                return "color: #22c55e"  # green
+            if val > 2:
+                return "color: #86efac"
+            if val < -5:
+                return "color: #ef4444"  # red
+            if val < -2:
+                return "color: #fca5a5"
+            return ""
+
+        styled = df_edge.style.map(_color_edge, subset=["Edge pp"])
+        st.dataframe(styled, use_container_width=True, hide_index=True)
+    else:
+        st.info("No edge opportunities ≥ 3pp found.")
+
+    # ── Per-category detail ──────────────────────────────────────────────────
+    st.markdown("#### Category Detail")
+
+    CATEGORY_ORDER = [
+        "best_picture",
+        "best_director",
+        "best_actor",
+        "best_actress",
+        "best_supporting_actor",
+        "best_supporting_actress",
+        "best_original_screenplay",
+        "best_adapted_screenplay",
+    ]
+
+    for slug in CATEGORY_ORDER:
+        cat = oscar_preds.get(slug)
+        if cat is None:
+            continue
+
+        with st.expander(f"**{cat.category_display}**", expanded=(slug == "best_picture")):
+            if cat.pending_precursors:
+                st.caption(f"⏳ Pending: {', '.join(cat.pending_precursors)}")
+
+            # Build per-category DataFrame
+            cat_rows = []
+            for r in cat.nominees:
+                kelly = kelly_bet_size(r, oscar_bankroll)
+                cat_rows.append(
+                    {
+                        "Nominee": r.nominee,
+                        "Film": r.film,
+                        "Model %": round(r.model_prob * 100, 1),
+                        "Market ¢": round((r.kalshi_price or 0) * 100) if r.kalshi_price is not None else None,
+                        "Gold Derby %": round((r.gold_derby_prob or 0) * 100, 1) if r.gold_derby_prob else None,
+                        "Edge pp": round((r.edge_vs_market or 0) * 100, 1) if r.edge_vs_market is not None else None,
+                        "Kelly $": round(kelly) if kelly else None,
+                        "Precursors Won": ", ".join(r.precursors_won) if r.precursors_won else "—",
+                    }
+                )
+            df_cat = pd.DataFrame(cat_rows)
+
+            # Probability bar chart inline
+            fig_cat, ax_cat = plt.subplots(figsize=(7, max(2.0, len(cat.nominees) * 0.45)))
+            names = [r.nominee for r in cat.nominees]
+            probs = [r.model_prob * 100 for r in cat.nominees]
+            market_probs = [(r.kalshi_price or 0) * 100 for r in cat.nominees]
+            y_pos = range(len(names))
+            ax_cat.barh(y_pos, probs, color="#3b82f6", alpha=0.85, label="Model", height=0.4, align="center")
+            ax_cat.barh(
+                [y + 0.42 for y in y_pos],
+                market_probs,
+                color="#f59e0b",
+                alpha=0.65,
+                label="Kalshi market",
+                height=0.4,
+                align="center",
+            )
+            ax_cat.set_yticks([y + 0.21 for y in y_pos])
+            ax_cat.set_yticklabels(names, fontsize=9)
+            ax_cat.set_xlabel("Probability (%)")
+            ax_cat.set_xlim(0, 105)
+            ax_cat.legend(fontsize=8, loc="lower right")
+            ax_cat.spines["top"].set_visible(False)
+            ax_cat.spines["right"].set_visible(False)
+            fig_cat.tight_layout()
+            st.pyplot(fig_cat)
+            plt.close(fig_cat)
+
+            st.dataframe(df_cat, use_container_width=True, hide_index=True)
+
+            # Top pick annotation
+            top = cat.top_pick
+            best_edge = cat.best_edge_opportunity
+            col_top, col_best = st.columns(2)
+            col_top.metric("Model top pick", top.nominee, f"{top.model_prob*100:.1f}% model")
+            if best_edge and best_edge.edge_vs_market is not None and abs(best_edge.edge_vs_market) > 0.02:
+                edge_pp = best_edge.edge_vs_market * 100
+                action = "BUY YES" if edge_pp > 0 else "BUY NO"
+                col_best.metric(
+                    f"Best edge: {action} {best_edge.nominee}",
+                    f"{edge_pp:+.1f}pp",
+                    f"model {best_edge.model_prob*100:.1f}% vs market {(best_edge.kalshi_price or 0)*100:.0f}¢",
+                )
