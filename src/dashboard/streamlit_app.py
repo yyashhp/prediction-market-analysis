@@ -28,6 +28,7 @@ from src.dashboard.app import create_feed_manager  # noqa: E402
 from src.dashboard.config import DashboardConfig  # noqa: E402
 from src.live.feed_manager import MarketSnapshot  # noqa: E402
 from src.rv.classifier import Topic  # noqa: E402
+from src.rv.info_efficiency import EdgeOpportunity, classify_info_efficiency  # noqa: E402
 from src.rv.matcher import ContractSeries, _extract_threshold, detect_series  # noqa: E402
 from src.rv.normalizer import NormalizedQuote  # noqa: E402
 
@@ -89,10 +90,13 @@ def _polymarket_quotes_to_df(quotes: list[NormalizedQuote]) -> pd.DataFrame:
     """Flat table for Polymarket binary Yes/No questions."""
     rows = []
     for q in quotes:
+        rating = classify_info_efficiency(q)
         rows.append(
             {
                 "Question": q.title,
                 "Topic": q.topic.capitalize() if q.topic else "—",
+                "Ref Market": rating.backing_source.value,
+                "Edge": _EDGE_LABELS[rating.edge_opportunity],
                 "Mid": round(q.prob_mid_or_last, 4),
                 "Bid": round(q.prob_bid, 4) if q.prob_bid is not None else None,
                 "Ask": round(q.prob_ask, 4) if q.prob_ask is not None else None,
@@ -121,10 +125,13 @@ def _kalshi_events_summary_df(kalshi_quotes: list[NormalizedQuote]) -> pd.DataFr
         total_vol = sum(q.total_volume or 0 for q in gq)
         close_times = [q.close_time for q in gq if q.close_time]
         closes = min(close_times).date() if close_times else None
+        rating = classify_info_efficiency(gq[0])
         rows.append(
             {
                 "Event": event_key,
                 "Topic": topic,
+                "Ref Market": rating.backing_source.value,
+                "Edge": _EDGE_LABELS[rating.edge_opportunity],
                 "Outcomes": len(gq),
                 "Best Spread pp": best_spread,
                 "Total Vol ($)": round(total_vol),
@@ -151,6 +158,85 @@ def _kalshi_outcomes_df(quotes: list[NormalizedQuote]) -> pd.DataFrame:
             }
         )
     return pd.DataFrame(rows)
+
+
+_EDGE_LABELS: dict[EdgeOpportunity, str] = {
+    EdgeOpportunity.VERY_LOW: "🔴 Efficient",
+    EdgeOpportunity.LOW: "🟠 Low Edge",
+    EdgeOpportunity.MEDIUM: "🟡 Model Edge",
+    EdgeOpportunity.HIGH: "🟢 Potential Edge",
+}
+
+# Sort key so tables order HIGH → MEDIUM → LOW → VERY_LOW
+_EDGE_SORT: dict[EdgeOpportunity, int] = {
+    EdgeOpportunity.HIGH: 0,
+    EdgeOpportunity.MEDIUM: 1,
+    EdgeOpportunity.LOW: 2,
+    EdgeOpportunity.VERY_LOW: 3,
+}
+
+
+def _edge_opportunities_df(quotes: list[NormalizedQuote]) -> pd.DataFrame:
+    """Table used in the Edge Opportunities tab — one row per contract."""
+    rows = []
+    for q in quotes:
+        rating = classify_info_efficiency(q)
+        rows.append(
+            {
+                "Title": q.title,
+                "Venue": q.venue.capitalize(),
+                "Topic": q.topic.capitalize() if q.topic else "—",
+                "Reference Market": rating.backing_source.value,
+                "Edge": _EDGE_LABELS[rating.edge_opportunity],
+                "_edge_sort": _EDGE_SORT[rating.edge_opportunity],
+                "Spread pp": round(q.spread * 100, 2) if q.spread is not None else None,
+                "Total Vol": round(q.total_volume or 0),
+                "Closes": q.close_time.date() if q.close_time else None,
+            }
+        )
+    df = pd.DataFrame(rows)
+    if df.empty:
+        return df
+    return (
+        df.sort_values(["_edge_sort", "Total Vol"], ascending=[True, False])
+        .drop(columns=["_edge_sort"])
+        .reset_index(drop=True)
+    )
+
+
+def _topic_efficiency_summary_df(quotes: list[NormalizedQuote]) -> pd.DataFrame:
+    """One row per topic: counts, avg spread, dominant backing source, edge level."""
+    from collections import Counter, defaultdict
+
+    topic_groups: dict[str, list[NormalizedQuote]] = defaultdict(list)
+    for q in quotes:
+        topic_groups[q.topic or "other"].append(q)
+
+    rows = []
+    for topic, tq in topic_groups.items():
+        ratings = [classify_info_efficiency(q) for q in tq]
+        spreads = [q.spread * 100 for q in tq if q.spread is not None]
+        avg_spread = round(sum(spreads) / len(spreads), 1) if spreads else None
+        dominant_edge = Counter(r.edge_opportunity for r in ratings).most_common(1)[0][0]
+        dominant_source = Counter(r.backing_source for r in ratings).most_common(1)[0][0]
+        rows.append(
+            {
+                "Topic": topic.capitalize(),
+                "Markets": len(tq),
+                "Avg Spread (pp)": avg_spread,
+                "Reference Market": dominant_source.value,
+                "Edge Level": _EDGE_LABELS[dominant_edge],
+                "_edge_sort": _EDGE_SORT[dominant_edge],
+            }
+        )
+    df = pd.DataFrame(rows)
+    if df.empty:
+        return df
+    return (
+        df.sort_values(["_edge_sort", "Markets"], ascending=[True, False])
+        .drop(columns=["_edge_sort"])
+        .reset_index(drop=True)
+    )
 
 
 def _term_structure_chart(
@@ -359,10 +445,11 @@ st.markdown("---")
 
 # ─── Tabs ─────────────────────────────────────────────────────────────────────
 
-tab_poly, tab_kalshi, tab_groups, tab_term, tab_cdf = st.tabs(
+tab_poly, tab_kalshi, tab_edge, tab_groups, tab_term, tab_cdf = st.tabs(
     [
         "📊  Polymarket",
         "🎯  Kalshi Events",
+        "🔍  Edge Opportunities",
         "🔗  Event Groups",
         "📈  Term Structures",
         "📉  Threshold CDFs",
@@ -388,6 +475,14 @@ with tab_poly:
             hide_index=True,
             column_config={
                 "Question": st.column_config.TextColumn("Question", width="large"),
+                "Ref Market": st.column_config.TextColumn(
+                    "Ref Market",
+                    help="External market/model that informs this price. 'None' = no professional reference → higher edge potential.",
+                ),
+                "Edge": st.column_config.TextColumn(
+                    "Edge",
+                    help="🟢 Potential Edge: no reference market. 🟡 Model Edge: reference exists but retail don't use it. 🟠 Low: sports books. 🔴 Efficient: CME/crypto.",
+                ),
                 "Mid": st.column_config.ProgressColumn(
                     "Mid (Yes %)",
                     help="Implied probability of Yes outcome (0–1). Bar fill = probability.",
@@ -439,6 +534,14 @@ with tab_kalshi:
             column_config={
                 "Event": st.column_config.TextColumn("Event Ticker", width="medium"),
                 "Topic": st.column_config.TextColumn("Topic"),
+                "Ref Market": st.column_config.TextColumn(
+                    "Ref Market",
+                    help="External market/model that informs this price.",
+                ),
+                "Edge": st.column_config.TextColumn(
+                    "Edge",
+                    help="🟢 Potential Edge: no reference market. 🟡 Model Edge: reference exists but retail don't use it. 🟠 Low: sports books. 🔴 Efficient: CME/crypto.",
+                ),
                 "Outcomes": st.column_config.NumberColumn("# Outcomes", format="%d"),
                 "Best Spread pp": st.column_config.NumberColumn("Best Spread (pp)", format="%.2f"),
                 "Total Vol ($)": st.column_config.NumberColumn("Total Vol ($)", format="$%,.0f"),
@@ -486,7 +589,137 @@ with tab_kalshi:
             )
 
 # ════════════════════════════════════════════════════════════════════════════════
-# TAB 2 — Event Groups
+# TAB 3 — Edge Opportunities
+# Classifies every contract by information efficiency.  Markets with no external
+# reference price (entertainment, niche events) are flagged as high-edge.
+# Markets backed by CME/sports-books/crypto are flagged as efficient.
+# ════════════════════════════════════════════════════════════════════════════════
+
+with tab_edge:
+    # Count markets by edge tier across both venues
+    _all_ratings = [(q, classify_info_efficiency(q)) for q in all_shown]
+    _high = [(q, r) for q, r in _all_ratings if r.edge_opportunity == EdgeOpportunity.HIGH]
+    _medium = [(q, r) for q, r in _all_ratings if r.edge_opportunity == EdgeOpportunity.MEDIUM]
+    _low = [(q, r) for q, r in _all_ratings if r.edge_opportunity == EdgeOpportunity.LOW]
+    _efficient = [(q, r) for q, r in _all_ratings if r.edge_opportunity == EdgeOpportunity.VERY_LOW]
+
+    mc1, mc2, mc3, mc4 = st.columns(4)
+    mc1.metric(
+        "🟢 Potential Edge",
+        len(_high),
+        help="No reference market — prices set by retail without professional consensus.",
+    )
+    mc2.metric(
+        "🟡 Model Edge",
+        len(_medium),
+        help="Reference model exists (NWP weather, polling) but retail participants rarely use it.",
+    )
+    mc3.metric("🟠 Low Edge", len(_low), help="Professional reference (sports books) — hard to beat.")
+    mc4.metric(
+        "🔴 Efficient",
+        len(_efficient),
+        help="Deep liquid reference market (CME FedWatch, crypto exchanges) — arb'd quickly.",
+    )
+
+    st.markdown("---")
+
+    # ── Topic efficiency overview ─────────────────────────────────────────────
+    st.markdown("#### Market Efficiency by Topic")
+    st.caption(
+        "Each row shows the dominant backing source and edge level for that topic. "
+        "Focus research time on topics near the top of this table."
+    )
+    topic_df = _topic_efficiency_summary_df(all_shown)
+    st.dataframe(
+        topic_df,
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "Topic": st.column_config.TextColumn("Topic"),
+            "Markets": st.column_config.NumberColumn("# Markets", format="%d"),
+            "Avg Spread (pp)": st.column_config.NumberColumn("Avg Spread (pp)", format="%.1f"),
+            "Reference Market": st.column_config.TextColumn("Reference Market"),
+            "Edge Level": st.column_config.TextColumn("Edge Level"),
+        },
+    )
+
+    st.markdown("---")
+
+    # ── High-edge markets ─────────────────────────────────────────────────────
+    st.markdown("#### 🟢 High Edge Potential — No Reference Market")
+    st.caption(
+        "These markets have **no liquid external reference price**.  "
+        "Market makers are setting bid/ask based on gut feel, copying each other, or chasing "
+        "social media sentiment — not consulting a professional consensus source.  "
+        "Even a basic systematic model (historical base rates, sentiment analysis, domain research) "
+        "can generate meaningful edge here."
+    )
+    if _high:
+        df_high = _edge_opportunities_df([q for q, _ in _high])
+        st.dataframe(
+            df_high,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Title": st.column_config.TextColumn("Market", width="large"),
+                "Reference Market": st.column_config.TextColumn("Reference Market"),
+                "Edge": st.column_config.TextColumn("Edge"),
+                "Spread pp": st.column_config.NumberColumn("Spread (pp)", format="%.2f"),
+                "Total Vol": st.column_config.NumberColumn("Total Vol ($)", format="$%,.0f"),
+                "Closes": st.column_config.DateColumn("Closes"),
+            },
+        )
+    else:
+        st.info("No high-edge markets under current filters.")
+
+    st.markdown("---")
+
+    # ── Model-edge markets ────────────────────────────────────────────────────
+    st.markdown("#### 🟡 Model Edge — Reference Exists, Retail Doesn't Use It")
+    st.caption(
+        "A reference model or data source **exists** for these markets, but most prediction market "
+        "participants are **not consulting it**.  "
+        "Edge is available if you can access and correctly apply the model:\n\n"
+        "- **Weather** → ECMWF/GFS ensemble NWP output vs. retail temperature guesses  \n"
+        "- **Politics** → Polling aggregators (Silver Bulletin) vs. vibes-based political takes  \n"
+        "- **Minor sports** → Niche lines or props where books are less sharp"
+    )
+    if _medium:
+        df_med = _edge_opportunities_df([q for q, _ in _medium])
+        st.dataframe(
+            df_med,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Title": st.column_config.TextColumn("Market", width="large"),
+                "Reference Market": st.column_config.TextColumn("Reference Market"),
+                "Edge": st.column_config.TextColumn("Edge"),
+                "Spread pp": st.column_config.NumberColumn("Spread (pp)", format="%.2f"),
+                "Total Vol": st.column_config.NumberColumn("Total Vol ($)", format="$%,.0f"),
+                "Closes": st.column_config.DateColumn("Closes"),
+            },
+        )
+    else:
+        st.info("No model-edge markets under current filters.")
+
+    # ── Efficient-market reminder ─────────────────────────────────────────────
+    with st.expander(
+        f"🔴 Efficient markets ({len(_efficient)} CME/crypto) and 🟠 Low edge ({len(_low)} sports books) — expand to see"
+    ):
+        st.caption(
+            "**Efficient** (CME FedWatch, crypto exchanges): Deep professional arbitrage closes "
+            "any gap within minutes. Do not attempt to find edge here.\n\n"
+            "**Low edge** (major sports books): Vegas and FanDuel lines are set by teams of "
+            "professional oddsmakers with billions in capital. Prediction market prices closely "
+            "track vig-free book probabilities. Very hard to beat systematically."
+        )
+        if _efficient or _low:
+            df_eff = _edge_opportunities_df([q for q, _ in _efficient + _low])
+            st.dataframe(df_eff, use_container_width=True, hide_index=True)
+
+
+# ════════════════════════════════════════════════════════════════════════════════
+# TAB 4 — Event Groups
 # Browse any event group with 2+ contracts. Auto-renders a term-structure chart
 # or threshold chart depending on what the group contains.
 # ════════════════════════════════════════════════════════════════════════════════

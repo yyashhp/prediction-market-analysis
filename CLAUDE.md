@@ -54,6 +54,37 @@ related contracts constrain each other?* Three structural analogs replace the vo
 | **Crypto** | Low | Perp markets, options, on-chain analytics = efficient; skip unless unique alpha | Skip |
 | **Politics** | Avoid | High adverse selection; insider risk; not systematic | Do not trade |
 
+### Information Efficiency & Backing Source Classification
+
+Not all prediction markets are equally hard to beat.  The key question: **who is setting the
+bid/ask, and what are they referencing?**
+
+When a deep, liquid reference market exists, sophisticated arbitrageurs quickly close any gap
+between the reference and the prediction market → little edge remains.  When no reference exists,
+prices are set by retail participants without professional consensus → systematic analysis can gain
+meaningful edge.
+
+**BackingSource taxonomy** (implemented in `src/rv/info_efficiency.py`):
+
+| Backing Source | Examples | Edge Opportunity |
+|---------------|---------|-----------------|
+| **CME FedWatch** | Fed rate decisions, FOMC outcomes | 🔴 Very Low — billions in futures volume; arb'd in minutes |
+| **Crypto Exchanges** | BTC price levels, ETH milestones | 🔴 Very Low — perpetuals + options (Deribit, Binance) + on-chain |
+| **Sports Books** | NFL, NBA, World Cup, UFC (major leagues) | 🟠 Low — professional oddsmakers with capital |
+| **NWP Models (ECMWF/GFS)** | Temperature, precipitation, hurricanes | 🟡 Medium — model exists, retail doesn't use it |
+| **Polling Aggregators** | Elections, approval ratings | 🟡 Medium — Silver Bulletin/538 covers major races; niche = thinner |
+| **None** | Grammy/Oscar winners, reality TV, niche cultural events | 🟢 High — no reference; prices set by retail guessing |
+
+The dashboard's **🔍 Edge Opportunities** tab surfaces these ratings for every market, with:
+- A topic-level efficiency overview table (sorted HIGH → MEDIUM → LOW → EFFICIENT)
+- Filtered tables of 🟢 High Edge and 🟡 Model Edge markets
+- Efficient/low-edge markets collapsed into an expander (don't waste time there)
+
+**Key insight on weather**: ECMWF/GFS ensemble NWP output is vastly superior to retail intuition,
+yet most prediction market participants never consult it.  Weather is therefore `MEDIUM` edge
+(the reference exists) rather than `HIGH` (no reference) — but it's the best systematic edge
+available because the model is both accessible (NWS API is free) and clearly superior.
+
 ### Why Not Market Making?
 - Severe adverse selection (informed trader hits your quote when you're wrong → lose full $1/contract)
 - Inventory management ties up 2× capital for 1× risk exposure
@@ -102,7 +133,12 @@ src/
 ### New Modules (Complete)
 ```
 src/
-  rv/                # Relative value core: normalizer, matcher, edge calc, Kelly
+  rv/
+    normalizer.py    # NormalizedQuote dataclass + Kalshi/Polymarket converters
+    classifier.py    # Topic classification (macro/sports/weather/crypto/politics/entertainment/other)
+    matcher.py       # Series detection: term structure + threshold CDF series
+    edge.py          # Edge/Kelly sizing calculations
+    info_efficiency.py  # Market information efficiency: BackingSource + EdgeOpportunity classification
   live/              # Live API polling layer (KalshiFeed, PolymarketFeed, FeedManager)
   dashboard/
     streamlit_app.py # PRIMARY UI — Streamlit research dashboard (make dashboard)
@@ -207,6 +243,7 @@ make setup                           # download 36GiB historical dataset
 14. **Don't mess with weirdly-termed contracts** — stick to standardized series even if oddball contracts have edge (execution risk too high)
 15. **Feed pagination is capped** — Kalshi max 5 pages (1000 markets), Polymarket max 5 pages (2500 markets), with inter-page sleep to avoid 429s; both fetched in parallel via ThreadPoolExecutor
 16. **Edge definition is not binary** — every contract/series carries raw metrics (bid/ask/mid/spread/volume/OI/close_time); the `metadata` dict on Edge objects holds fitted distribution params, residuals, etc. The dashboard surfaces all of this, not just a pass/fail flag
+17. **Information efficiency classification added** — `src/rv/info_efficiency.py` classifies every contract by backing source (CME FedWatch / sports books / crypto exchanges / NWP weather models / polling aggregators / none) and edge opportunity (VERY_LOW → HIGH). Shown as "Ref Market" and "Edge" columns in both venue tables. New "🔍 Edge Opportunities" tab shows high/model-edge markets prominently and collapses efficient markets into an expander. Entertainment/awards = HIGH edge; CME Fed/crypto = VERY_LOW.
 
 ---
 
@@ -231,4 +268,4 @@ make setup                           # download 36GiB historical dataset
 
 ---
 
-*Last updated: 2026-02-24 — Dashboard data quality fixes: Polymarket bid/ask/spread/vol24h now populated from gamma API fields; OI proxied by liquidity; event_group uses slug-stripping for series detection; default topic filter changed to ALL topics so Kalshi elections-API markets appear; Market Browser no longer shows ID/Event Group columns. Round 2: KX-prefix topic classification, Kalshi parlay title cleanup, _extract_threshold false positive fix (bare \+), MULTIGAME event_group fix, CDF tab KeyError fix.*
+*Last updated: 2026-02-26 — Dashboard data quality fixes (rounds 1–2). Round 3: venue-split tabs (Polymarket flat binary table + Kalshi event-grouped table with outcome drill-down). Round 4: information efficiency classification — BackingSource + EdgeOpportunity per market, Ref Market + Edge columns in venue tables, new 🔍 Edge Opportunities tab with topic overview + filtered high/model-edge market tables.*
